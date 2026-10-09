@@ -1,23 +1,20 @@
-# sharding-repl-cache — запуск и проверка
+# pymongo-api (шардированный кластер MongoDB + репликация + кеширование)
 
-Шардированный кластер MongoDB (`shard1`, `shard2`) с репликацией (по 3 узла в
-каждом шарде: 1 PRIMARY + 2 SECONDARY), роутером `mongos`, config-сервером
-`configSrv` и кешем **Redis**. Приложение `pymongo-api` сначала проверяет кеш и
-ходит в MongoDB только при промахе.
+Вариант 3 из `sharding-repl-cache.drawio`: приложение `pymongo-api` ходит в
+роутер `mongos`, который распределяет данные между двумя шардами (`shard1`,
+`shard2`), а метаданные хранит на config-сервере (`configSrv`). Каждый шард
+является реплика-сетом из 3 узлов (1 PRIMARY + 2 SECONDARY), что обеспечивает
+отказоустойчивость и сохранность данных. Поверх этого добавлен **кеш Redis**:
+приложение сначала проверяет кеш и ходит в MongoDB только при промахе, что
+снижает нагрузку на кластер и ускоряет повторные запросы.
 
-Кеш включается переменной окружения `REDIS_URL`
-(`redis://<redis-service-name>:6379`). Если переменная не задана — приложение
+Кеширование включается переменной окружения `REDIS_URL`
+(`redis://<redis-service-name>:6379`). Если переменная не задана, приложение
 работает без кеша.
-
-Все команды ниже выполняются из каталога `sharding-repl-cache`:
-
-```shell
-cd sharding-repl-cache
-```
 
 ## Схема
 
-![Вариант 4: шардирование + репликация + кеширование (Redis) + API Gateway + Service Discovery (Consul) + CDN](sharding-repl-cache-consul-cdn.png)
+![Схема шардированного кластера MongoDB с репликацией и кешированием](sharding-repl-cache.png)
 
 ## Состав кластера
 
@@ -40,6 +37,8 @@ cd sharding-repl-cache
 ## Как запустить
 
 ### Шаг 1. Поднять контейнеры
+
+Запускаем config-сервер, шарды (по 3 реплики), роутер, кеш Redis и приложение:
 
 ```shell
 docker compose up -d
@@ -68,26 +67,32 @@ docker compose ps
 
 ### Шаг 3. Проверить приложение
 
-Локально — откройте http://localhost:8080
+#### Если вы запускаете проект на локальной машине
 
-На виртуальной машине — узнайте белый ip и откройте `http://<ip>:8080`:
+Откройте в браузере http://localhost:8080
+
+#### Если вы запускаете проект на предоставленной виртуальной машине
+
+Узнать белый ip виртуальной машины:
 
 ```shell
 curl --silent http://ifconfig.me
 ```
 
+Откройте в браузере http://<ip виртуальной машины>:8080
+
+Ожидаемый ответ: в JSON поле `mongo_topology_type` равно `Sharded`,
+`mongo_is_mongos` равно `true`, в `shards` перечислены `shard1` и `shard2`,
+а `cache_enabled` равно `true` (значит, переменная `REDIS_URL` долетела до
+приложения и Redis доступен).
+
 ```shell
 curl -s http://localhost:8080/
 ```
 
-Ожидаемый ответ: в JSON поле `mongo_topology_type` равно `Sharded`,
-`mongo_is_mongos` равно `true`, в `shards` перечислены `shard1` и `shard2`,
-а `cache_enabled` равно `true` (значит, `REDIS_URL` долетела до приложения и
-Redis доступен).
-
 ### Шаг 4. Проверить репликацию
 
-Статус реплика-сета каждого шарда (1 PRIMARY и 2 SECONDARY):
+Статус реплика-сета каждого шарда (должны быть видны 1 PRIMARY и 2 SECONDARY):
 
 ```shell
 docker compose exec -T shard1-1 mongosh --port 27018 --quiet --eval 'rs.status().members.map(m => ({ name: m.name, state: m.stateStr }))'
@@ -95,6 +100,8 @@ docker compose exec -T shard2-1 mongosh --port 27019 --quiet --eval 'rs.status()
 ```
 
 ### Шаг 5. Проверить распределение данных по шардам
+
+Смотрим, как 2000 документов разложились между `shard1` и `shard2`:
 
 ```shell
 docker compose exec -T mongos_router mongosh --port 27020 somedb --quiet --eval "db.helloDoc.getShardDistribution()"
@@ -122,7 +129,7 @@ time curl -s http://localhost:8080/helloDoc/users > /dev/null
 ```
 
 Windows (PowerShell) — `time` там нет, используем `Measure-Command`, а `curl`
-вызываем как `curl.exe`:
+вызываем как `curl.exe` (иначе это алиас `Invoke-WebRequest`, не понимающий `-s`):
 
 ```powershell
 Measure-Command { curl.exe -s http://localhost:8080/helloDoc/users > $null }
@@ -132,7 +139,7 @@ Measure-Command { curl.exe -s http://localhost:8080/helloDoc/users > $null }
 Первый запрос занимает ~1 секунду (поход в MongoDB), второй отвечает заметно
 быстрее — он обслужен из кеша Redis.
 
-Посмотреть ключи кеша в Redis:
+Посмотреть сами ключи кеша в Redis:
 
 ```shell
 docker compose exec -T redis redis-cli keys 'api:cache*'
@@ -140,7 +147,7 @@ docker compose exec -T redis redis-cli keys 'api:cache*'
 
 ## Доступные эндпоинты
 
-Список доступных эндпоинтов — swagger: `http://<ip>:8080/docs`
+Список доступных эндпоинтов, swagger http://<ip виртуальной машины>:8080/docs
 
 ## Как остановить
 
@@ -155,4 +162,3 @@ docker compose down
 ```shell
 docker compose down -v
 ```
-</content>
